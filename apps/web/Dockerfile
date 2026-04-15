@@ -1,9 +1,14 @@
+# syntax=docker/dockerfile:1
 # ── Build stage ───────────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+# Copy lockfile + manifest first — this layer is cached until deps change.
+COPY package*.json ./
+# Use cache mount so npm registry data is reused across builds.
+# Falls back to npm install if no lockfile is present.
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --prefer-offline
 
 COPY . .
 RUN npm run build

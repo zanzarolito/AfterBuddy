@@ -1,11 +1,13 @@
+# syntax=docker/dockerfile:1
 FROM node:20-alpine AS base
 WORKDIR /app
 
-# Dependencies
-COPY package.json ./
-RUN npm install --production
+# Copy lockfile + manifest first — this layer is cached until deps change.
+COPY package*.json ./
+# Use cache mount so npm registry data is reused across builds.
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --omit=dev --prefer-offline
 
-# Application code
 COPY src/ ./src/
 COPY data/ ./data/
 

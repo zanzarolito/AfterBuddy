@@ -3,7 +3,18 @@ version: "3.9"
 # AfterBuddy — Docker Compose
 # Usage:
 #   cp .env.example .env   # edit credentials
-#   docker compose up --build
+#   DOCKER_BUILDKIT=1 docker compose up --build
+#
+# BuildKit is required for the --mount=type=cache directives in the Dockerfiles.
+# It is enabled by default in Docker Desktop and Docker Engine >= 23.
+# Set DOCKER_BUILDKIT=1 explicitly if your Docker version requires it.
+
+x-bake:
+  group:
+    default:
+      targets:
+        - api
+        - web
 
 services:
   # ── PostgreSQL 16 + PostGIS ───────────────────────────────────────────────
