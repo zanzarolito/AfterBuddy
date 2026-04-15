@@ -1,0 +1,33 @@
+# AfterBuddy — Caddyfile
+# Replace "afterbuddy.example.com" with your actual domain.
+# For local development use "localhost" — Caddy auto-generates a self-signed cert.
+
+afterbuddy.example.com {
+    # Reverse-proxy the API (SSE-aware).
+    handle /api/* {
+        reverse_proxy api:3000 {
+            # Keep SSE connections alive.
+            flush_interval -1
+            transport http {
+                read_timeout  1h
+                write_timeout 1h
+            }
+        }
+    }
+
+    # Serve the React PWA.
+    handle {
+        reverse_proxy web:80
+    }
+
+    # Security headers.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+    }
+
+    encode gzip
+    log
+}

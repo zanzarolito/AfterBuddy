@@ -1,0 +1,123 @@
+version: "3.9"
+
+# AfterBuddy — Docker Compose
+# Usage:
+#   cp .env.example .env   # edit credentials
+#   docker compose up --build
+
+services:
+  # ── PostgreSQL 16 + PostGIS ───────────────────────────────────────────────
+  postgres:
+    image: postgis/postgis:16-3.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-afterbuddy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-afterbuddy_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-afterbuddy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-afterbuddy}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ── API (Fastify) ─────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-afterbuddy}:${POSTGRES_PASSWORD:-afterbuddy_secret}@postgres:5432/${POSTGRES_DB:-afterbuddy}
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - backend
+      - frontend
+
+  # ── Migrate + Seed (one-shot) ─────────────────────────────────────────────
+  migrate:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: sh -c "node src/db/migrate.js && node src/db/seed.js"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-afterbuddy}:${POSTGRES_PASSWORD:-afterbuddy_secret}@postgres:5432/${POSTGRES_DB:-afterbuddy}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - backend
+
+  # ── Web (React PWA via Nginx) ─────────────────────────────────────────────
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    networks:
+      - frontend
+
+  # ── Caddy (reverse proxy + automatic HTTPS) ───────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+      - api
+    networks:
+      - frontend
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:
+    driver: bridge
+  frontend:
+    driver: bridge
