@@ -5,10 +5,11 @@
  *  - suggestions: Array<{ id, nom, type, votes, distanceMeters, osmLink }>
  *  - participantId: string | null
  *  - onVote: (suggestionId: string) => void
- *  - myVote: string | null  (suggestion id the current participant voted for)
+ *  - myVote: string | null
  */
 export default function VotingPanel({ suggestions = [], participantId, onVote, myVote }) {
   const totalVotes = suggestions.reduce((sum, s) => sum + (s.votes ?? 0), 0);
+  const hasVoted = myVote !== null;
 
   if (suggestions.length === 0) {
     return (
@@ -25,9 +26,11 @@ export default function VotingPanel({ suggestions = [], participantId, onVote, m
         const isChosen = myVote === s.id;
 
         return (
-          <div key={s.id} className={`card transition-all ${isChosen ? 'border-brand-500' : ''}`}>
+          <div
+            key={s.id}
+            className={`card transition-all ${isChosen ? 'border-brand-500 bg-brand-700/10' : ''}`}
+          >
             <div className="flex items-start gap-3">
-              {/* Rank badge */}
               <span className="shrink-0 w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs font-bold">
                 {idx + 1}
               </span>
@@ -35,11 +38,12 @@ export default function VotingPanel({ suggestions = [], participantId, onVote, m
               <div className="flex-1 min-w-0">
                 <p className="font-semibold text-white text-sm truncate">{s.nom}</p>
                 <p className="text-xs text-zinc-400 mb-2">
-                  {s.type === 'bar' ? '🍺 Bar' : '☕ Café'}
+                  {s.type === 'bar' ? '🍺 Bar / Pub' : s.type === 'cafe' ? '☕ Café' : '🍽️ Restaurant'}
+                  {s.address && ` · ${s.address}`}
                   {s.distanceMeters != null && ` · ${s.distanceMeters} m`}
                 </p>
 
-                {/* Vote bar */}
+                {/* Vote progress bar */}
                 <div className="flex items-center gap-2">
                   <div className="flex-1 bg-zinc-700 rounded-full h-1.5 overflow-hidden">
                     <div
@@ -54,20 +58,21 @@ export default function VotingPanel({ suggestions = [], participantId, onVote, m
               </div>
             </div>
 
-            {/* Actions */}
             <div className="flex items-center gap-2 mt-3">
               {participantId && (
-                <button
-                  type="button"
-                  onClick={() => onVote(s.id)}
-                  className={
-                    isChosen
-                      ? 'btn-primary text-xs px-3 py-1.5'
-                      : 'btn-secondary text-xs px-3 py-1.5'
-                  }
-                >
-                  {isChosen ? '✓ Mon choix' : 'Voter'}
-                </button>
+                isChosen ? (
+                  <span className="btn-primary text-xs px-3 py-1.5 pointer-events-none">
+                    ✓ Mon choix
+                  </span>
+                ) : !hasVoted ? (
+                  <button
+                    type="button"
+                    onClick={() => onVote(s.id)}
+                    className="btn-secondary text-xs px-3 py-1.5"
+                  >
+                    Voter
+                  </button>
+                ) : null
               )}
 
               {s.osmLink && (

@@ -3,28 +3,21 @@ import maplibregl from 'maplibre-gl';
 
 const MAP_STYLE = import.meta.env.VITE_MAP_STYLE ?? 'https://tiles.openfreemap.org/styles/liberty';
 
-/**
- * MapLibre GL JS map wrapper.
- *
- * Props:
- *  - participants: Array<{ nom, lng, lat, station_nom }>
- *  - centroid: { lng, lat } | null
- *  - suggestions: Array<{ nom, lng, lat }>
- *  - className: string
- */
 export default function Map({ participants = [], centroid = null, suggestions = [], className = '' }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
+  // Track the last set of coordinates used for fitBounds — only refit when
+  // the actual points change, not on every SSE-triggered re-render.
+  const lastBoundsSigRef = useRef('');
 
-  // Initialize map once.
   useEffect(() => {
     if (mapRef.current) return;
 
     mapRef.current = new maplibregl.Map({
       container: containerRef.current,
       style: MAP_STYLE,
-      center: [2.3522, 48.8566], // Paris center
+      center: [2.3522, 48.8566],
       zoom: 11,
       attributionControl: false,
     });
@@ -33,7 +26,6 @@ export default function Map({ participants = [], centroid = null, suggestions = 
       new maplibregl.AttributionControl({ compact: true }),
       'bottom-right',
     );
-
     mapRef.current.addControl(new maplibregl.NavigationControl(), 'top-right');
 
     return () => {
@@ -42,7 +34,6 @@ export default function Map({ participants = [], centroid = null, suggestions = 
     };
   }, []);
 
-  // Update markers when data changes.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -51,7 +42,7 @@ export default function Map({ participants = [], centroid = null, suggestions = 
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
 
-    // Participant markers (purple pin).
+    // Participant markers.
     participants.forEach((p) => {
       const el = document.createElement('div');
       el.className =
@@ -71,7 +62,7 @@ export default function Map({ participants = [], centroid = null, suggestions = 
       markersRef.current.push(marker);
     });
 
-    // Centroid marker (star).
+    // Centroid marker.
     if (centroid) {
       const el = document.createElement('div');
       el.className =
@@ -87,8 +78,12 @@ export default function Map({ participants = [], centroid = null, suggestions = 
       markersRef.current.push(marker);
     }
 
-    // Suggestion markers (numbered).
+    // Suggestion markers.
     suggestions.forEach((s, i) => {
+      const lng = s.lng ?? centroid?.lng;
+      const lat = s.lat ?? centroid?.lat;
+      if (lng == null || lat == null) return;
+
       const el = document.createElement('div');
       el.className =
         'w-8 h-8 rounded-full bg-emerald-500 border-2 border-white shadow-lg flex items-center justify-center text-white text-xs font-bold cursor-pointer';
@@ -96,25 +91,29 @@ export default function Map({ participants = [], centroid = null, suggestions = 
       el.title = s.nom;
 
       const marker = new maplibregl.Marker({ element: el })
-        .setLngLat([s.lng ?? centroid?.lng, s.lat ?? centroid?.lat])
+        .setLngLat([lng, lat])
         .setPopup(new maplibregl.Popup({ offset: 20 }).setText(s.nom))
         .addTo(map);
 
       markersRef.current.push(marker);
     });
 
-    // Fit bounds to all points.
-    const allPoints = [
-      ...participants.map((p) => [p.lng, p.lat]),
-      ...(centroid ? [[centroid.lng, centroid.lat]] : []),
-    ];
+    // Only call fitBounds when the set of points actually changes.
+    const boundPoints = [
+      ...participants.map((p) => `${p.lng},${p.lat}`),
+      centroid ? `${centroid.lng},${centroid.lat}` : '',
+    ].filter(Boolean);
 
-    if (allPoints.length > 0) {
-      const bounds = allPoints.reduce(
+    const sig = boundPoints.join('|');
+    if (sig && sig !== lastBoundsSigRef.current) {
+      lastBoundsSigRef.current = sig;
+
+      const coords = boundPoints.map((s) => s.split(',').map(Number));
+      const bounds = coords.reduce(
         (b, p) => b.extend(p),
-        new maplibregl.LngLatBounds(allPoints[0], allPoints[0]),
+        new maplibregl.LngLatBounds(coords[0], coords[0]),
       );
-      map.fitBounds(bounds, { padding: 60, maxZoom: 14 });
+      map.fitBounds(bounds, { padding: 60, maxZoom: 14, duration: 800 });
     }
   }, [participants, centroid, suggestions]);
 

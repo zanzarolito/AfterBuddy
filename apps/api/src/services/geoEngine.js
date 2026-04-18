@@ -1,44 +1,37 @@
 /**
  * GeoEngine – core spatial computation service.
  *
- * Responsibilities:
- *  1. Calculate the geographic centroid of all participants' stations.
- *  2. Snap the centroid to the nearest "vibe zone" (nightlife area).
- *  3. Apply the equity algorithm: shift centroid toward outlier participants.
- *  4. Return ranked POI suggestions close to the adjusted centroid.
+ * 1. Calculate the geographic centroid of all participants' stations.
+ * 2. Apply equity algorithm: shift toward outlier participants (> mean + 2σ).
+ * 3. Snap centroid 60% toward the nearest nightlife vibe zone.
+ * 4. Fetch real nearby POIs (bars, pubs, cafés) from the Overpass API.
  */
 
-/**
- * @param {import('pg').Pool} db
- * @param {string} sessionId
- * @returns {Promise<{ centroid: {lng: number, lat: number}, vibeZone: string, suggestions: Array }>}
- */
+const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+const OVERPASS_TIMEOUT_MS = 12_000;
+const SEARCH_RADIUS_M = 600;
+
 export async function computeMeetingPoint(db, sessionId) {
   // ── 1. Fetch participant geometries ────────────────────────────────────────
   const { rows: participants } = await db.query(
     `SELECT p.id, ST_X(p.geom) AS lng, ST_Y(p.geom) AS lat
-     FROM participants p
-     WHERE p.session_id = $1`,
+     FROM participants p WHERE p.session_id = $1`,
     [sessionId],
   );
 
-  if (participants.length === 0) {
-    throw new Error('No participants in session');
-  }
+  if (participants.length === 0) throw new Error('No participants in session');
 
   // ── 2. Compute raw centroid via PostGIS ───────────────────────────────────
   const { rows: centroidRows } = await db.query(
     `SELECT ST_X(ST_Centroid(ST_Collect(geom))) AS lng,
             ST_Y(ST_Centroid(ST_Collect(geom))) AS lat
-     FROM participants
-     WHERE session_id = $1`,
+     FROM participants WHERE session_id = $1`,
     [sessionId],
   );
 
   let { lng: centLng, lat: centLat } = centroidRows[0];
 
-  // ── 3. Equity algorithm ───────────────────────────────────────────────────
-  // Compute distance from each participant to the centroid.
+  // ── 3. Equity algorithm (2σ outlier shift) ────────────────────────────────
   const distances = participants.map((p) =>
     haversineKm(centLat, centLng, p.lat, p.lng),
   );
@@ -46,78 +39,60 @@ export async function computeMeetingPoint(db, sessionId) {
   const variance =
     distances.reduce((sum, d) => sum + (d - mean) ** 2, 0) / distances.length;
   const stdDev = Math.sqrt(variance);
-  const threshold = mean + 2 * stdDev;
 
-  // Outliers: participants more than (mean + 2σ) away from centroid.
-  const outliers = participants.filter(
-    (_, i) => distances[i] > threshold,
-  );
-
+  const outliers = participants.filter((_, i) => distances[i] > mean + 2 * stdDev);
   if (outliers.length > 0) {
-    // Shift centroid 20% toward the average outlier position.
-    const avgOutlierLat =
-      outliers.reduce((sum, p) => sum + p.lat, 0) / outliers.length;
-    const avgOutlierLng =
-      outliers.reduce((sum, p) => sum + p.lng, 0) / outliers.length;
-
-    centLat = centLat + 0.2 * (avgOutlierLat - centLat);
-    centLng = centLng + 0.2 * (avgOutlierLng - centLng);
+    const avgLat = outliers.reduce((s, p) => s + p.lat, 0) / outliers.length;
+    const avgLng = outliers.reduce((s, p) => s + p.lng, 0) / outliers.length;
+    centLat += 0.2 * (avgLat - centLat);
+    centLng += 0.2 * (avgLng - centLng);
   }
 
-  // ── 4. Snap to nearest vibe zone ─────────────────────────────────────────
+  // ── 4. Snap to nearest vibe zone ──────────────────────────────────────────
   const { rows: vibeRows } = await db.query(
     `SELECT nom,
-            ST_Distance(
-              geom::geography,
-              ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
-            ) AS dist_m
-     FROM vibe_zones
-     ORDER BY dist_m ASC
-     LIMIT 1`,
+            ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint($1,$2),4326)::geography) AS dist_m
+     FROM vibe_zones ORDER BY dist_m ASC LIMIT 1`,
     [centLng, centLat],
   );
-
   const vibeZone = vibeRows[0]?.nom ?? 'Centre';
 
-  // Blend centroid 60% toward vibe zone center (avoid placing meeting in a
-  // residential deadzone while staying close to the math optimum).
   const { rows: vibeGeomRows } = await db.query(
-    `SELECT ST_X(geom) AS lng, ST_Y(geom) AS lat
-     FROM vibe_zones WHERE nom = $1`,
+    `SELECT ST_X(geom) AS lng, ST_Y(geom) AS lat FROM vibe_zones WHERE nom = $1`,
     [vibeZone],
   );
-
   if (vibeGeomRows.length > 0) {
-    const { lng: vLng, lat: vLat } = vibeGeomRows[0];
-    centLng = centLng * 0.4 + vLng * 0.6;
-    centLat = centLat * 0.4 + vLat * 0.6;
+    centLng = centLng * 0.4 + vibeGeomRows[0].lng * 0.6;
+    centLat = centLat * 0.4 + vibeGeomRows[0].lat * 0.6;
   }
 
-  // ── 5. Retrieve nearby POI suggestions ───────────────────────────────────
-  // We store curated POIs alongside vibe zones. For the MVP we fall back to
-  // returning the 5 closest vibe zone names plus fabricated venue names so
-  // the flow is complete end-to-end without requiring Overpass/OSM queries.
-  const { rows: nearbyVibe } = await db.query(
-    `SELECT nom,
-            ST_Distance(
-              geom::geography,
-              ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
-            ) AS dist_m
-     FROM vibe_zones
-     ORDER BY dist_m ASC
-     LIMIT 5`,
-    [centLng, centLat],
-  );
+  // ── 5. Fetch real POIs from Overpass API ──────────────────────────────────
+  let suggestions = await fetchOverpassPOIs(centLat, centLng, SEARCH_RADIUS_M);
 
-  // Build synthetic suggestions from vibe zones.
-  const suggestions = nearbyVibe.map((vz, idx) => ({
-    rank: idx + 1,
-    nom: `${vz.nom} – Bar / Café`,
-    type: idx % 2 === 0 ? 'bar' : 'cafe',
-    zone: vz.nom,
-    distanceMeters: Math.round(vz.dist_m),
-    osmLink: osmDirectionsUrl(centLat, centLng, vz.nom),
-  }));
+  // Fallback: if Overpass returns nothing, widen search to 1 km.
+  if (suggestions.length === 0) {
+    suggestions = await fetchOverpassPOIs(centLat, centLng, 1000);
+  }
+
+  // Last resort: synthetic suggestions from vibe zones.
+  if (suggestions.length === 0) {
+    const { rows: fallback } = await db.query(
+      `SELECT nom,
+              ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint($1,$2),4326)::geography) AS dist_m
+       FROM vibe_zones ORDER BY dist_m ASC LIMIT 5`,
+      [centLng, centLat],
+    );
+    suggestions = fallback.map((vz, i) => ({
+      rank: i + 1,
+      nom: vz.nom,
+      type: 'bar',
+      address: null,
+      lat: centLat,
+      lng: centLng,
+      distanceMeters: Math.round(vz.dist_m),
+      osmLink: osmDirectionsUrl(centLat, centLng, vz.nom + ' Paris'),
+    }));
+  }
 
   return {
     centroid: { lng: centLng, lat: centLat },
@@ -127,9 +102,58 @@ export async function computeMeetingPoint(db, sessionId) {
   };
 }
 
+// ── Overpass API ──────────────────────────────────────────────────────────────
+
+async function fetchOverpassPOIs(lat, lng, radiusM) {
+  const query = `
+[out:json][timeout:10];
+(
+  node["amenity"~"^(bar|pub|cafe)$"](around:${radiusM},${lat},${lng});
+);
+out body 5;
+  `.trim();
+
+  try {
+    const res = await fetch(OVERPASS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `data=${encodeURIComponent(query)}`,
+      signal: AbortSignal.timeout(OVERPASS_TIMEOUT_MS),
+    });
+
+    if (!res.ok) return [];
+
+    const json = await res.json();
+    const elements = json.elements ?? [];
+
+    return elements
+      .filter((el) => el.tags?.name)
+      .slice(0, 5)
+      .map((el, i) => {
+        const amenity = el.tags.amenity;
+        const type = amenity === 'cafe' ? 'cafe' : 'bar';
+        const street = el.tags['addr:street'] ?? '';
+        const number = el.tags['addr:housenumber'] ?? '';
+        const address = street ? `${number} ${street}`.trim() : null;
+
+        return {
+          rank: i + 1,
+          nom: el.tags.name,
+          type,
+          address,
+          lat: el.lat,
+          lng: el.lon,
+          distanceMeters: Math.round(haversineKm(lat, lng, el.lat, el.lon) * 1000),
+          osmLink: osmDirectionsUrl(lat, lng, `${el.lat},${el.lon}`),
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Haversine distance in km between two WGS-84 points. */
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
   const dLat = toRad(lat2 - lat1);
@@ -144,8 +168,6 @@ function toRad(deg) {
   return (deg * Math.PI) / 180;
 }
 
-/** Generate an OSM directions link. */
-function osmDirectionsUrl(lat, lng, name) {
-  const dest = encodeURIComponent(name + ', Paris');
-  return `https://www.openstreetmap.org/directions?from=${lat},${lng}&to=${dest}`;
+function osmDirectionsUrl(fromLat, fromLng, to) {
+  return `https://www.openstreetmap.org/directions?from=${fromLat},${fromLng}&to=${encodeURIComponent(to)}`;
 }
