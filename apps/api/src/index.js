@@ -31,6 +31,21 @@ await fastify.register(cors, {
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
 });
 await fastify.register(sensible);
+
+// Allow POST requests with Content-Type: application/json but an empty body
+// (e.g. POST /api/sessions which takes no payload).
+fastify.addContentTypeParser(
+  'application/json',
+  { parseAs: 'string' },
+  (req, body, done) => {
+    if (!body || body.trim() === '') return done(null, {});
+    try {
+      done(null, JSON.parse(body));
+    } catch (err) {
+      done(err);
+    }
+  },
+);
 await fastify.register(fp(postgresPlugin));
 await fastify.register(fp(redisPlugin));
 
