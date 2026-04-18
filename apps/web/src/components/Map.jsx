@@ -28,7 +28,17 @@ export default function Map({ participants = [], centroid = null, suggestions = 
     );
     mapRef.current.addControl(new maplibregl.NavigationControl(), 'top-right');
 
+    // When the flex layout shifts (sidebar grows/shrinks due to SSE updates,
+    // autocomplete dropdown, etc.), the map container resizes. Without an
+    // explicit resize() call, MapLibre recalculates its center incorrectly,
+    // making the map drift upward. ResizeObserver catches every size change.
+    const ro = new ResizeObserver(() => {
+      mapRef.current?.resize();
+    });
+    ro.observe(containerRef.current);
+
     return () => {
+      ro.disconnect();
       mapRef.current?.remove();
       mapRef.current = null;
     };
